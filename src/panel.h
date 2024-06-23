@@ -1,5 +1,5 @@
 #pragma once
 
-#include <Arduino.h>
-
-typedef uint8_t Panel[3];
+struct Panel {
+	uint8_t registers[3];
+};
