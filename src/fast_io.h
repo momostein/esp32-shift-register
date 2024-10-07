@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+
 static inline __attribute__((always_inline)) void directWriteLow(uint32_t pin)
 {
 	if (pin < 32)
