@@ -7,208 +7,145 @@
 #include "panel.h"
 #include "fast_io.h"
 
+// Set your Static IP address
+const IPAddress local_IP(10, 0, 0, 180);
+// Set your Gateway IP address
+const IPAddress gateway(10, 0, 0, 1);
 
-/*	
-	inputs -> panels:
-		D13 -> 2 -> 1
-		D12 -> 4 -> 3
-		D14 -> 6 -> 5
-		D27 -> 8 -> 7
-		D26 -> 10 -> 9
-		D25 -> 12 -> 11
+const IPAddress subnet(255, 255, 0, 0);
+const IPAddress primaryDNS(8, 8, 8, 8);	  // optional
+const IPAddress secondaryDNS(8, 8, 4, 4); // optional
 
-		D33 -> 14 -> 13
-		D32 -> 16 -> 15
-		D35 -> 18 -> 17
-		D34 -> 20 -> 19
-*/
+const int UDP_PORT = 3333; // The port that this ESP is listening on
 
-const int input_pin = 13;
+const int PANELS_PER_CHANNEL = 2;
+const int REGISTERS_PER_PANEL = 3;
+const int BITS_PER_REGISTER = 8;
 
-const uint32_t input_bit = 1 << input_pin;
+const int CHANNEL_PINS[] = {
+	13, // D13 -> 2 -> 1
+	12, // D12 -> 4 -> 3
+	14, // D14 -> 6 -> 5
+	27, // D27 -> 8 -> 7
+	26, // D26 -> 10 -> 9
+	25, // D25 -> 12 -> 11
+	33, // D33 -> 14 -> 13
+	32, // D32 -> 16 -> 15
+	35, // D35 -> 18 -> 17
+	34, // D34 -> 20 -> 19
+};
+
+const int CHANNEL_COUNT = sizeof(CHANNEL_PINS) / sizeof(int);
+
+WiFiUDP udp;
+
+IPAddress target_address;
+uint16_t target_port;
 
 void setup()
 {
-	shift_reg_init();
-	pinMode(input_pin, INPUT);
-
+	shiftRegInit();
+	for (int i = 0; i < CHANNEL_COUNT; i++)
+	{
+		pinMode(CHANNEL_PINS[i], INPUT);
+	}
 
 	Serial.begin(9600);
+
+	// Configures static IP address
+	if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
+	{
+		Serial.println("STA Failed to configure");
+	}
+
+	WiFi.begin(WLAN_SSID, WLAN_PWD);
+	Serial.print("Connecting");
+
+	// Wait for connection
+	while (WiFi.status() != WL_CONNECTED)
+	{
+		delay(500);
+		Serial.print(".");
+	}
+
+	Serial.println("");
+	Serial.print("Connected to ");
+	Serial.println(WLAN_SSID);
+
+	Serial.print("IP address: ");
+	Serial.print(WiFi.localIP());
+	Serial.print(":");
+	Serial.println(UDP_PORT);
+
+	udp.begin(UDP_PORT);
+	udp.flush();
+
+	while (udp.parsePacket() < 4)
+	{
+		delay(100);
+	}
+
+	unsigned char data[4];
+	udp.read(data, 4);
+
+	target_address = udp.remoteIP();
+	target_port = udp.remotePort();
+
+	Serial.print("Target set to ");
+	Serial.print(target_address);
+	Serial.print(":");
+	Serial.println(target_port);
+
+	Serial.println(target_address);
+	Serial.println(target_port);
+	udp.flush();
 }
 
 void loop()
 {
-	shift_reg_parallel_load();
-	for (int panel = 0; panel < 2; panel++)
+	byte registers[CHANNEL_COUNT * PANELS_PER_CHANNEL][REGISTERS_PER_PANEL] = {};
+
+	if (udp.parsePacket() >= 4)
 	{
-		uint32_t bits = 0;
-		for (int i = 0; i < 24; i++)
-		{
-			int x = shift_reg_shift_in() & input_bit;
-			bits = bits << 1 | (x != 0);
-		}
-		
-		Serial.print("Panel ");
-		Serial.print(panel);
-		Serial.print(":\t");
-		Serial.print(bits, BIN);
-		Serial.print("\t");
+		unsigned char data[4];
+		udp.read(data, 4);
+
+		target_address = udp.remoteIP();
+		target_port = udp.remotePort();
+
+		Serial.print("Target changed to ");
+		Serial.print(target_address);
+		Serial.print(":");
+		Serial.println(target_port);
 	}
 
-	Serial.println();
-	delay(500);
+	shiftRegSetModeStore();
+	shiftRegClockPulse();
+
+	shiftRegSetModeShift();
+	for (int registerGroup = PANELS_PER_CHANNEL - 1; registerGroup >= 0; registerGroup--)
+	{
+		int panelOffset = (PANELS_PER_CHANNEL - 1 - registerGroup);
+
+		for (int registerIndex = 0; registerIndex < REGISTERS_PER_PANEL; registerIndex++)
+		{
+			for (int bitIndex = 0; bitIndex < BITS_PER_REGISTER; bitIndex++)
+			{
+				shiftRegClockPulse();
+				for (int channelIndex = 0; channelIndex < CHANNEL_COUNT; channelIndex++)
+				{
+					int panelId = panelOffset + channelIndex * PANELS_PER_CHANNEL;
+
+					byte value = directRead(CHANNEL_PINS[channelIndex]);
+					registers[panelId][registerIndex] |= value << bitIndex;
+				}
+			}
+		}
+	}
+
+	udp.beginPacket(target_address, target_port);
+	udp.write((uint8_t *)(&registers), sizeof(registers));
+	udp.endPacket();
+
+	delay(50);
 }
-
-// const int dataPin = 27;
-
-// const int loadPin = 25;
-
-// WiFiUDP udp;
-
-// IPAddress target_address;
-// uint16_t target_port;
-
-// const int CHECK_INTERVAL = 4;
-
-// Panels read_panels()
-// {
-// 	// Load parallel inputs into shift register
-// 	directWriteLow(loadPin);
-// 	delayMicroseconds(1);
-// 	directWriteHigh(clockPin);
-// 	delayMicroseconds(1);
-// 	directWriteLow(clockPin);
-// 	delayMicroseconds(1);
-
-// 	// Shift inputs and read bit per bit into value
-// 	directWriteHigh(loadPin);
-
-// 	Panels panels;
-
-// 	for (size_t panelIndex = 0; panelIndex < sizeof(panels) / sizeof(Panel); panelIndex++)
-// 	{
-// 		for (size_t regIndex = 0; regIndex < 3; regIndex++)
-// 		{
-// 			uint8_t reg = 0;
-
-// 			for (size_t bit_i = 0; bit_i < 8; bit_i++)
-// 			{
-
-// 				uint8_t read = (GPIO.in >> dataPin) & 1;
-
-// 				reg |= (read << bit_i);
-
-// 				delayMicroseconds(1);
-// 				directWriteHigh(clockPin);
-// 				delayMicroseconds(1);
-// 				directWriteLow(clockPin);
-// 				delayMicroseconds(1);
-// 			}
-
-// 			panels.panels[panelIndex].registers[regIndex] = reg;
-// 		}
-// 	}
-
-// 	return panels;
-// }
-
-// void print_message(unsigned char *data, size_t length)
-// {
-// 	for (size_t i = 0; i < length; i++)
-// 	{
-// 		Serial.print(data[i], HEX);
-// 	}
-// 	Serial.println();
-// }
-
-// void setup()
-// {
-
-// 	pinMode(dataPin, INPUT);
-// 	pinMode(clockPin, OUTPUT);
-// 	pinMode(loadPin, OUTPUT);
-
-// 	directWriteLow(clockPin);
-// 	directWriteHigh(loadPin);
-
-// 	Serial.begin(9600);
-
-// 	WiFi.begin(WLAN_SSID, WLAN_PWD);
-// 	Serial.print("Connecting");
-
-// 	// Wait for connection
-// 	while (WiFi.status() != WL_CONNECTED)
-// 	{
-// 		delay(500);
-// 		Serial.print(".");
-// 	}
-
-// 	Serial.println("");
-// 	Serial.print("Connected to ");
-// 	Serial.println(WLAN_SSID);
-
-// 	Serial.print("IP address: ");
-// 	Serial.print(WiFi.localIP());
-// 	Serial.print(":");
-// 	Serial.println(UDP_PORT);
-
-// 	udp.begin(UDP_PORT);
-// 	udp.flush();
-
-// 	while (udp.parsePacket() < 4)
-// 	{
-// 		delay(100);
-// 	}
-
-// 	unsigned char data[4];
-// 	udp.read(data, 4);
-// 	print_message(data, 4);
-
-// 	target_address = udp.remoteIP();
-// 	target_port = udp.remotePort();
-
-// 	Serial.println(target_address);
-// 	Serial.println(target_port);
-// 	udp.flush();
-// }
-
-// void printPanels(const Panels &panels)
-// {
-// 	for (size_t panelIndex = 0; panelIndex < sizeof(panels) / sizeof(Panel); panelIndex++)
-// 	{
-// 		for (size_t regIndex = 0; regIndex < 3; regIndex++)
-// 		{
-// 			uint8_t reg = panels.panels[panelIndex].registers[regIndex];
-// 			Serial.printf("%02X", reg);
-// 		}
-// 		if (panelIndex < (sizeof(panels) / sizeof(Panel)) - 1)
-// 			Serial.print(" ");
-// 	}
-// 	Serial.println();
-// }
-
-// void loop()
-// {
-// 	if (udp.parsePacket() >= 4)
-// 	{
-// 		unsigned char data[4];
-// 		udp.read(data, 4);
-// 		print_message(data, 4);
-
-// 		target_address = udp.remoteIP();
-// 		target_port = udp.remotePort();
-// 	}
-
-// 	for (int check_loop = 0; check_loop < CHECK_INTERVAL; check_loop++)
-// 	{
-// 		Panels panels = read_panels();
-
-// 		// printPanels(panels);
-
-// 		udp.beginPacket(target_address, target_port);
-// 		udp.write((uint8_t *)(&panels), sizeof(panels));
-// 		udp.endPacket();
-
-// 		delay(50);
-// 	}
-// }
